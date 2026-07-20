@@ -1,0 +1,54 @@
+name: SMC Bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "analyze = full report on every ticker | screen = only qualifying setups | both = full report + screening summary"
+        required: true
+        default: "screen"
+        type: choice
+        options:
+          - analyze
+          - screen
+          - both
+      tickers:
+        description: "Space-separated tickers, e.g. RELIANCE.NS TCS.NS INFY.NS. Leave blank to use the default watchlist in config.py"
+        required: false
+        default: ""
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check secrets are configured
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "::error::TELEGRAM_BOT_TOKEN secret is not set. Go to Settings > Secrets and variables > Actions > Secrets tab and add it."
+            exit 1
+          fi
+          if [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "::error::TELEGRAM_CHAT_ID secret is not set. Go to Settings > Secrets and variables > Actions > Secrets tab and add it."
+            exit 1
+          fi
+          echo "Secrets are present."
+
+      - name: Run
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MODE: ${{ github.event.inputs.mode }}
+          TICKERS: ${{ github.event.inputs.tickers }}
+        run: python run.py

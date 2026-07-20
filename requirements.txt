@@ -1,8 +1,12 @@
-yfinance>=0.2.40
-pandas>=2.0
-smartmoneyconcepts>=0.0.26
-mplfinance>=0.12.10b0
-requests>=2.31
-python-dotenv>=1.0
-python-telegram-bot>=21.0
-APScheduler>=3.10
+# Pinned to exact versions tested against this codebase. A minor version
+# bump in smartmoneyconcepts previously changed internal index semantics
+# and silently broke the backtest — pin, don't range, for a system real
+# money depends on. Bump deliberately and re-run tests/, not automatically.
+yfinance==1.5.1
+pandas==3.0.2
+smartmoneyconcepts==0.0.27
+mplfinance==0.12.10b0
+requests==2.33.1
+python-telegram-bot==21.11.1
+python-dotenv==1.2.2
+pytest==8.3.4

@@ -27,18 +27,88 @@ WATCHLIST = [
 
 # Candle timeframe + lookback for analysis
 INTERVAL = "1d"        # "1d", "1h", "15m" etc (intraday intervals limit lookback on yfinance)
-LOOKBACK_PERIOD = "1y" # how much history to pull
+LOOKBACK_PERIOD = "3y" # longer history = more backtest occurrences = a less noisy win-rate estimate
 
 # SMC engine tuning
 SWING_LENGTH = 10        # smaller = more sensitive swing detection, larger = major structure only
 LIQUIDITY_RANGE_PCT = 0.01
+STRUCTURE_RECENCY_BARS = 10   # a confirmed structure break older than this many bars no longer
+                               # counts as the "current" signal — stale structure isn't a live setup
 
-# Backtest settings used to turn "setup type" into an honest historical win-rate
-BACKTEST_FORWARD_BARS = 10   # how many bars forward we check for a win after a signal
-BACKTEST_MIN_SAMPLES = 8     # don't report a probability unless we found at least this many past occurrences
+# Confluence weights. NOT all equal — a discretionary trader weights a
+# confirmed structure break or HTF alignment far higher than a loose FVG
+# touch. Each category can contribute its weight AT MOST ONCE (multiple
+# overlapping order blocks near the same zone are one confluence, not
+# several — see score_signal for the dedup logic this backs).
+WEIGHT_STRUCTURE = 2
+WEIGHT_HTF = 2
+WEIGHT_ORDER_BLOCK = 1
+WEIGHT_FVG = 1
+WEIGHT_ZONE = 1
+WEIGHT_LIQUIDITY_SWEEP = 1
+WEIGHT_OB_FVG_OVERLAP = 1   # bonus: OB and FVG both present in the same zone ("consequent encroachment")
+MAX_POSSIBLE_SCORE = (WEIGHT_STRUCTURE + WEIGHT_HTF + WEIGHT_ORDER_BLOCK + WEIGHT_FVG
+                       + WEIGHT_ZONE + WEIGHT_LIQUIDITY_SWEEP + WEIGHT_OB_FVG_OVERLAP)  # 9
 
-# Screener filter: only alert when a setup scores at or above this
-MIN_SCORE_TO_ALERT = 2  # see smc_engine.score_signal for how score is built
+# Higher-timeframe bias (weekly) — standard SMC/ICT top-down practice:
+# trade in the direction of the dominant trend, treat counter-trend setups
+# as lower conviction rather than ignoring them outright.
+USE_HTF_FILTER = True
+HTF_INTERVAL = "1wk"
+HTF_LOOKBACK = "3y"
+HTF_SWING_LENGTH = 6
+HTF_RECENCY_BARS = 8     # weeks
+
+# Broader market regime filter (Nifty 50) — fetched ONCE per run and shared
+# across all symbols, not once per symbol, to avoid multiplying API calls.
+USE_INDEX_FILTER = True
+INDEX_SYMBOL = "^NSEI"
+INDEX_LOOKBACK = "3y"
+INDEX_SWING_LENGTH = 8
+INDEX_RECENCY_BARS = 15
+
+# Volatility / risk realism
+ATR_PERIOD = 14
+MIN_STOP_ATR_MULT = 1.0   # stop must be at least 1x ATR away from entry — rejects noise-tight stops
+                           # that look like a great R:R on paper but get stopped out by normal chop
+
+# Overnight gap risk — a stop-loss is only as good as the market's ability
+# to fill it. If the open has historically gapped past today's stop
+# distance often enough, warn that the stop may not be honored.
+GAP_RISK_LOOKBACK_DAYS = 252
+GAP_RISK_WARNING_THRESHOLD = 0.03   # warn if >3% of sessions gapped beyond the stop distance
+
+# Liquidity filter — thinly traded stocks have unreliable fills and wider slippage
+MIN_AVG_VOLUME = 100_000   # average daily volume over the last 20 sessions
+
+# Backtest settings used to turn "setup type" into an honest historical win-rate.
+# The backtest simulates the SAME stop/target distances as the live signal (not
+# just "did price move in the right direction") — a directional win where the
+# stop would have been hit first is NOT counted as a win.
+BACKTEST_FORWARD_BARS = 20      # max bars to wait for target/stop to be hit
+BACKTEST_MIN_SAMPLES = 15       # need at least this many resolved past trades before showing a win-rate
+CONFIDENCE_HIGH_SAMPLES = 30    # samples at/above this get labeled High confidence, else Medium
+
+# Screener filter: only alert when a setup scores at or above this. Requires
+# roughly "one major confluence (structure or HTF) plus one more", not just
+# any two minor ones stacked together.
+MIN_SCORE_TO_ALERT = 4  # out of MAX_POSSIBLE_SCORE (9)
 
 # Safety cap so a mistyped list of 200 tickers doesn't blow past API rate limits / run time
 MAX_TICKERS_PER_RUN = 100
+
+# Position sizing — opt-in. Set ACCOUNT_SIZE to a real number (e.g. via .env /
+# a secret, not hardcoded here) to get a suggested share quantity per trade
+# risking RISK_PER_TRADE_PCT of that account. Left as None by default so no
+# assumption is made about your capital.
+ACCOUNT_SIZE = os.environ.get("ACCOUNT_SIZE")
+ACCOUNT_SIZE = float(ACCOUNT_SIZE) if ACCOUNT_SIZE else None
+RISK_PER_TRADE_PCT = float(os.environ.get("RISK_PER_TRADE_PCT", "1.0"))
+
+REGULATORY_DISCLAIMER = (
+    "This is a rule-based structural analysis and backtest, not investment "
+    "advice under SEBI regulations, and this bot does not place or execute "
+    "any orders. It cannot see ASM/GSM surveillance status or Trade-to-Trade "
+    "segment restrictions — verify those on the exchange before trading any "
+    "symbol. Consult a SEBI-registered advisor for personalized advice."
+)

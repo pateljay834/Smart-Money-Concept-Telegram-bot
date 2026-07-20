@@ -30,10 +30,25 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Check secrets are configured
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "::error::TELEGRAM_BOT_TOKEN secret is not set. Go to Settings > Secrets and variables > Actions > Secrets tab and add it."
+            exit 1
+          fi
+          if [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "::error::TELEGRAM_CHAT_ID secret is not set. Go to Settings > Secrets and variables > Actions > Secrets tab and add it."
+            exit 1
+          fi
+          echo "Secrets are present."
+
       - name: Run
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          MODE: ${{ inputs.mode }}
-          TICKERS: ${{ inputs.tickers }}
+          MODE: ${{ github.event.inputs.mode }}
+          TICKERS: ${{ github.event.inputs.tickers }}
         run: python run.py

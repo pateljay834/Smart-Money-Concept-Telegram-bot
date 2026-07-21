@@ -79,7 +79,8 @@ aren't persistent). Run locally via `run.bat`, or on an always-on free host.
 
 - `config.py` — defaults, thresholds, reads secrets from environment/`.env`
 - `data_fetch.py` — OHLCV via yfinance, with retry on transient failures
-- `smc_engine.py` — SMC structure detection, scoring, risk levels, backtest-based win-rate
+- `smc_engine.py` — SMC structure detection, scoring, risk levels, backtest-based win-rate, ADX/RSI, time horizon
+- `fundamentals.py` — optional lightweight P/E, sector, market cap (best-effort, never blocks the pipeline)
 - `chart_utils.py` — candlestick chart with OB/FVG/entry-stop-target overlays, written to a temp file
 - `core.py` — shared batch-analysis + message-formatting logic (used by both entry points)
 - `run.py` — GitHub Actions / manual entry point (`MODE`, `TICKERS` env vars)
@@ -186,10 +187,11 @@ angle turned up one critical bug and several reliability gaps. Fixed:
   of O(n) per symbol) and was left out to keep runs fast enough for a manual
   GitHub Actions trigger — a reasonable trade-off for a screening tool, not
   for validating a strategy you're about to size seriously.
-- Scoring confluences (structure, OB, FVG, zone, sweep, HTF) are weighted
-  equally (1 point each). A real discretionary SMC trader would weight
-  structure break and HTF alignment more heavily than a loose FVG touch —
-  this is a simplification, not a calibrated model.
+- Scoring confluences are weighted (structure/HTF count more than a loose
+  FVG touch, see `config.WEIGHT_*`) and de-duplicated per direction, but the
+  specific weight values are still a reasoned judgment call, not a
+  statistically calibrated model — treat them as a sensible starting point
+  to tune, not ground truth.
 - No slippage, spread, or brokerage cost modeling in the backtest — real
   fills will be worse than the simulated target/stop levels, especially on
   the lower-liquidity end of what passes the liquidity filter.
@@ -209,12 +211,41 @@ angle turned up one critical bug and several reliability gaps. Fixed:
 - **The portfolio concentration check is directional only, not sector-aware.**
   It flags "all qualifying setups are LONG" but can't tell you 8 of them are
   all banking stocks — that would need per-symbol sector data, which isn't
-  fetched (yfinance's `.info` endpoint is slow and unreliable enough to risk
-  breaking runs for a nice-to-have).
-- **No fundamental or event-risk screen.** A technically clean setup can be
-  invalidated overnight by an earnings surprise or corporate action; none of
-  that is checked.
+  fetched in bulk (yfinance's `.info` endpoint is slow/unreliable enough
+  that it's only worth calling for symbols that already qualify — see
+  "Beyond SMC" below).
+- **Fundamentals are shallow and best-effort**, not a real event-risk
+  screen. A P/E and sector label doesn't catch an upcoming earnings date or
+  corporate action that could invalidate a clean technical setup overnight.
 - This is a single-strategy, single-timeframe-pair (daily + weekly) tool.
   It is not a substitute for your own risk management, and the "win-rate"
   is a backtest statistic on synthetic-free but limited historical data —
   not a forward-looking guarantee.
+
+## Beyond SMC — third round
+
+Added on top of pure SMC structure, per a trader/investor panel review:
+
+- **ADX trend-strength regime.** SMC/ICT structural signals are historically
+  less reliable in a choppy, range-bound market. Doesn't block a setup (a
+  real reversal has to start somewhere) but flags the regime.
+- **RSI momentum context.** Flags a stretched entry (buying into overbought,
+  shorting into oversold) even when the structural setup looks clean — risk
+  context, not a veto.
+- **Volume confirmation on the structure break itself**, not just average
+  liquidity — a break on above-average volume is real participation; a
+  break on thin volume is easier to fake and easier to reverse.
+- **Backtest-derived time horizon.** Instead of a guessed label, the bot
+  tracks how many bars it actually took, historically, for a WINNING trade
+  of this exact setup to reach target on this symbol, and buckets that into
+  Short-term / Swing / Positional / Extended. If there isn't a resolved win
+  yet, it says so rather than guessing.
+- **Optional lightweight fundamentals** (sector, P/E, market cap,
+  debt/equity) via yfinance, fetched only for symbols that already qualify
+  (to limit the extra API load) and designed to NEVER block or fail the
+  analysis — `fundamentals.py` swallows any fetch error and just omits the
+  section, since this endpoint has been unreliable in testing.
+
+None of these change the core signal or its score — they're context layered
+on top, the way a trader would sanity-check a setup against momentum, trend
+regime, and the underlying business before sizing it.

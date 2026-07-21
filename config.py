@@ -47,8 +47,11 @@ WEIGHT_FVG = 1
 WEIGHT_ZONE = 1
 WEIGHT_LIQUIDITY_SWEEP = 1
 WEIGHT_OB_FVG_OVERLAP = 1   # bonus: OB and FVG both present in the same zone ("consequent encroachment")
+WEIGHT_VOLUME_CONFIRMATION = 1   # the structure break happened on above-average volume — real
+                                   # participation, not a low-volume drift that shakes out easily
 MAX_POSSIBLE_SCORE = (WEIGHT_STRUCTURE + WEIGHT_HTF + WEIGHT_ORDER_BLOCK + WEIGHT_FVG
-                       + WEIGHT_ZONE + WEIGHT_LIQUIDITY_SWEEP + WEIGHT_OB_FVG_OVERLAP)  # 9
+                       + WEIGHT_ZONE + WEIGHT_LIQUIDITY_SWEEP + WEIGHT_OB_FVG_OVERLAP
+                       + WEIGHT_VOLUME_CONFIRMATION)  # 10
 
 # Higher-timeframe bias (weekly) — standard SMC/ICT top-down practice:
 # trade in the direction of the dominant trend, treat counter-trend setups
@@ -66,6 +69,20 @@ INDEX_SYMBOL = "^NSEI"
 INDEX_LOOKBACK = "3y"
 INDEX_SWING_LENGTH = 8
 INDEX_RECENCY_BARS = 15
+
+# Trend-strength regime (ADX/DMI) — beyond pure SMC. SMC/ICT structural
+# signals are historically less reliable in a choppy, non-trending market;
+# this doesn't block a setup (a real reversal has to start somewhere) but
+# flags the regime so you can weight the setup accordingly.
+ADX_PERIOD = 14
+ADX_TREND_THRESHOLD = 20   # below this, the market is considered range-bound/choppy
+
+# Momentum context (RSI) — used as a caution flag (chasing an overbought
+# move / selling into an oversold one), not a scored confluence. SMC gives
+# the structural "where"; RSI gives a sanity check on "how stretched".
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
 
 # Volatility / risk realism
 ATR_PERIOD = 14
@@ -92,10 +109,10 @@ CONFIDENCE_HIGH_SAMPLES = 30    # samples at/above this get labeled High confide
 # Screener filter: only alert when a setup scores at or above this. Requires
 # roughly "one major confluence (structure or HTF) plus one more", not just
 # any two minor ones stacked together.
-MIN_SCORE_TO_ALERT = 4  # out of MAX_POSSIBLE_SCORE (9)
+MIN_SCORE_TO_ALERT = 5  # out of MAX_POSSIBLE_SCORE (10)
 
 # Safety cap so a mistyped list of 200 tickers doesn't blow past API rate limits / run time
-MAX_TICKERS_PER_RUN = 100
+MAX_TICKERS_PER_RUN = 25
 
 # Position sizing — opt-in. Set ACCOUNT_SIZE to a real number (e.g. via .env /
 # a secret, not hardcoded here) to get a suggested share quantity per trade
@@ -104,6 +121,13 @@ MAX_TICKERS_PER_RUN = 100
 ACCOUNT_SIZE = os.environ.get("ACCOUNT_SIZE")
 ACCOUNT_SIZE = float(ACCOUNT_SIZE) if ACCOUNT_SIZE else None
 RISK_PER_TRADE_PCT = float(os.environ.get("RISK_PER_TRADE_PCT", "1.0"))
+
+# Lightweight fundamentals (P/E, sector, market cap) via yfinance's .info
+# endpoint. Purely best-effort: this endpoint has been unreliable in
+# testing (slow, occasionally 404s on valid symbols), so a failure here
+# NEVER blocks or warns — it just silently omits the fundamentals section.
+# Only fetched for symbols that already qualify, to limit extra API load.
+USE_FUNDAMENTALS = True
 
 REGULATORY_DISCLAIMER = (
     "This is a rule-based structural analysis and backtest, not investment "

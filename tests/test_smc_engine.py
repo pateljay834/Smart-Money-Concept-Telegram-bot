@@ -37,14 +37,15 @@ def test_confirmed_structure_events_uses_broken_index_not_swing_position():
 
 def test_backtest_never_uses_future_bars_beyond_the_window():
     ohlc = make_ohlc(750, seed=3)
-    win_rate, resolved, checked = smc_engine.backtest_setup(ohlc, "LONG", risk_dist=2.0, reward_dist=6.0)
+    win_rate, resolved, checked, avg_win_bars = smc_engine.backtest_setup(ohlc, "LONG", risk_dist=2.0, reward_dist=6.0)
     assert resolved <= checked
     assert win_rate is None or 0 <= win_rate <= 100
+    assert avg_win_bars is None or 0 < avg_win_bars <= config.BACKTEST_FORWARD_BARS
 
 
 def test_win_rate_hidden_below_min_samples():
     ohlc = make_ohlc(200, seed=1)
-    win_rate, resolved, checked = smc_engine.backtest_setup(ohlc, "LONG", risk_dist=1.0, reward_dist=2.0)
+    win_rate, resolved, checked, avg_win_bars = smc_engine.backtest_setup(ohlc, "LONG", risk_dist=1.0, reward_dist=2.0)
     if resolved < config.BACKTEST_MIN_SAMPLES:
         assert win_rate is None
 
@@ -201,3 +202,98 @@ def test_htf_bias_neutral_on_insufficient_history():
 def test_index_bias_returns_valid_label(daily_ohlc):
     result = smc_engine.index_bias(daily_ohlc)
     assert result in ("bull", "bear", "neutral")
+
+
+# --- Beyond-SMC additions: ADX, RSI, volume confirmation, time horizon ---
+
+def test_rsi_in_valid_range():
+    for seed in range(10):
+        ohlc = make_ohlc(750, seed=seed)
+        rsi = smc_engine.compute_rsi(ohlc)
+        valid = rsi.dropna()
+        assert (valid >= 0).all() and (valid <= 100).all()
+
+
+def test_rsi_high_for_strong_uptrend():
+    dates = pd.date_range("2021-01-01", periods=60, freq="D")
+    close = pd.Series(range(100, 160), index=dates, dtype=float)  # strictly rising, no down days
+    ohlc = pd.DataFrame({"open": close, "high": close + 0.5, "low": close - 0.5,
+                          "close": close, "volume": [500_000] * 60}, index=dates)
+    rsi = smc_engine.compute_rsi(ohlc)
+    assert rsi.iloc[-1] > 90  # a pure uptrend with zero down-days should be near 100
+
+
+def test_adx_in_valid_range():
+    for seed in range(10):
+        ohlc = make_ohlc(750, seed=seed)
+        adx = smc_engine.compute_adx(ohlc)
+        valid = adx.dropna()
+        assert (valid >= 0).all() and (valid <= 100).all()
+
+
+def test_adx_higher_for_trending_than_choppy_data():
+    dates = pd.date_range("2021-01-01", periods=200, freq="D")
+    trending_close = pd.Series(100 + np.arange(200) * 0.5, index=dates)
+    trending = pd.DataFrame({
+        "open": trending_close, "high": trending_close + 0.3, "low": trending_close - 0.3,
+        "close": trending_close, "volume": [500_000] * 200,
+    }, index=dates)
+
+    np.random.seed(0)
+    choppy_close = pd.Series(100 + np.sin(np.arange(200) / 3) * 2, index=dates)
+    choppy = pd.DataFrame({
+        "open": choppy_close, "high": choppy_close + 0.3, "low": choppy_close - 0.3,
+        "close": choppy_close, "volume": [500_000] * 200,
+    }, index=dates)
+
+    trend_adx = smc_engine.compute_adx(trending).iloc[-1]
+    choppy_adx = smc_engine.compute_adx(choppy).iloc[-1]
+    assert trend_adx > choppy_adx
+
+
+def test_volume_confirmed_true_on_spike():
+    dates = pd.date_range("2021-01-01", periods=50, freq="D")
+    vol = [100_000] * 50
+    vol[40] = 500_000  # a clear spike at position 40
+    df = pd.DataFrame({"open": [10] * 50, "high": [10] * 50, "low": [10] * 50,
+                        "close": [10] * 50, "volume": vol}, index=dates)
+    assert smc_engine._volume_confirmed(df, 40) is True
+
+
+def test_volume_confirmed_false_without_spike():
+    dates = pd.date_range("2021-01-01", periods=50, freq="D")
+    df = pd.DataFrame({"open": [10] * 50, "high": [10] * 50, "low": [10] * 50,
+                        "close": [10] * 50, "volume": [100_000] * 50}, index=dates)
+    assert smc_engine._volume_confirmed(df, 40) is False
+
+
+def test_time_horizon_none_without_data():
+    assert smc_engine._time_horizon(None) == (None, None)
+
+
+def test_time_horizon_labels_scale_with_bars():
+    short_days, short_label = smc_engine._time_horizon(2)
+    swing_days, swing_label = smc_engine._time_horizon(7)
+    positional_days, positional_label = smc_engine._time_horizon(15)
+    extended_days, extended_label = smc_engine._time_horizon(25)
+    assert "Short-term" in short_label
+    assert "Swing" in swing_label
+    assert "Positional" in positional_label
+    assert "Extended" in extended_label
+
+
+def test_adx_and_rsi_populated_on_signal():
+    ohlc = make_ohlc(750, seed=16)
+    sig = smc_engine.score_signal("T.NS", ohlc)
+    assert sig.adx is not None
+    assert sig.rsi is not None
+    assert 0 <= sig.rsi <= 100
+    assert sig.adx >= 0
+
+
+def test_low_adx_produces_choppy_regime_warning():
+    ohlc = make_ohlc(750, seed=16)
+    sig = smc_engine.score_signal("T.NS", ohlc, htf_direction="bear")
+    assert sig.direction == "SHORT"
+    if sig.adx is not None and sig.adx < config.ADX_TREND_THRESHOLD:
+        assert any("choppy" in w or "range-bound" in w for w in sig.warnings)

@@ -47,6 +47,11 @@ class Signal:
     confidence: str = None   # "Low", "Medium", "High", or None if no backtest ran
     htf_bias: str = None     # "bull", "bear", "neutral", or None if not checked
     index_bias: str = None   # same, for the broader market regime check
+    adx: float = None        # trend strength (independent of direction)
+    rsi: float = None        # momentum context
+    time_horizon_days: float = None   # avg bars-to-target among historical WINS of this exact setup
+    time_horizon_label: str = None
+    fundamentals: dict = None
 
 
 def compute_indicators(ohlc: pd.DataFrame):
@@ -68,6 +73,85 @@ def compute_atr(ohlc: pd.DataFrame, period: int = None) -> pd.Series:
         (low - prev_close).abs(),
     ], axis=1).max(axis=1)
     return tr.rolling(period, min_periods=period).mean()
+
+
+def compute_rsi(ohlc: pd.DataFrame, period: int = None) -> pd.Series:
+    """Wilder's RSI — momentum context, not a scored SMC confluence. Used as a caution flag only."""
+    period = period or config.RSI_PERIOD
+    delta = ohlc["close"].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - 100 / (1 + rs)
+    # avg_loss == 0 means no down days in the lookback: that's maximally
+    # overbought (RSI=100), not neutral — only BOTH being zero (a totally
+    # flat price) is genuinely neutral (RSI=50). The blind fillna(50) this
+    # replaced silently mislabeled strong uptrends as neutral momentum.
+    rsi = rsi.where(~((avg_loss == 0) & (avg_gain > 0)), 100.0)
+    rsi = rsi.where(~((avg_gain == 0) & (avg_loss > 0)), 0.0)
+    rsi = rsi.where(~((avg_gain == 0) & (avg_loss == 0)), 50.0)
+    return rsi
+
+
+def compute_adx(ohlc: pd.DataFrame, period: int = None) -> pd.Series:
+    """
+    Wilder's ADX — trend strength, independent of direction. Used as a
+    regime flag: SMC/ICT structural signals are historically less reliable
+    in a choppy, non-trending market. This never blocks a setup (a real
+    reversal has to start somewhere) but surfaces the regime as context.
+    """
+    period = period or config.ADX_PERIOD
+    high, low, close = ohlc["high"], ohlc["low"], ohlc["close"]
+
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+    prev_close = close.shift(1)
+    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+
+    atr = tr.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    plus_di = 100 * pd.Series(plus_dm, index=ohlc.index).ewm(alpha=1 / period, adjust=False, min_periods=period).mean() / atr.replace(0, np.nan)
+    minus_di = 100 * pd.Series(minus_dm, index=ohlc.index).ewm(alpha=1 / period, adjust=False, min_periods=period).mean() / atr.replace(0, np.nan)
+
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    adx = dx.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    return adx.fillna(0)
+
+
+def _volume_confirmed(ohlc: pd.DataFrame, bar_pos: int, mult: float = 1.5) -> bool:
+    """Did the bar at `bar_pos` trade on meaningfully above-average volume? Real participation vs a thin drift."""
+    if bar_pos <= 0 or bar_pos >= len(ohlc):
+        return False
+    avg_vol = ohlc["volume"].iloc[max(0, bar_pos - 20):bar_pos].mean()
+    if not avg_vol or np.isnan(avg_vol) or avg_vol <= 0:
+        return False
+    return bool(ohlc["volume"].iloc[bar_pos] >= avg_vol * mult)
+
+
+def _time_horizon(avg_win_bars: float) -> tuple:
+    """
+    Convert the backtest's own average bars-to-target (among WINNING trades
+    of this exact setup) into a holding-period estimate. This is data-driven
+    from the symbol's own history, not a guessed label — if there's no
+    resolved win data, this returns (None, None) rather than a made-up horizon.
+    """
+    if avg_win_bars is None:
+        return None, None
+    days = round(avg_win_bars, 1)
+    if avg_win_bars <= 3:
+        label = "Short-term (a few trading days)"
+    elif avg_win_bars <= 10:
+        label = "Swing (roughly 1-2 weeks)"
+    elif avg_win_bars <= 20:
+        label = "Positional (roughly 2-4 weeks)"
+    else:
+        label = f"Extended positional (4+ weeks, up to the {config.BACKTEST_FORWARD_BARS}-day backtest window)"
+    return days, label
 
 
 def confirmed_structure_events(structure: pd.DataFrame) -> pd.DataFrame:
@@ -194,6 +278,11 @@ def score_signal(symbol: str, ohlc: pd.DataFrame, htf_direction: str = None, ind
     atr = float(atr_series.iloc[-1]) if not np.isnan(atr_series.iloc[-1]) else None
     proximity_buffer = (atr * 0.25) if atr else price * 0.005
 
+    adx_series = compute_adx(ohlc)
+    adx = float(adx_series.iloc[-1]) if not np.isnan(adx_series.iloc[-1]) else None
+    rsi_series = compute_rsi(ohlc)
+    rsi = float(rsi_series.iloc[-1]) if not np.isnan(rsi_series.iloc[-1]) else None
+
     bull_score, bear_score = 0, 0
     reasons = []
     warnings = []
@@ -206,8 +295,10 @@ def score_signal(symbol: str, ohlc: pd.DataFrame, htf_direction: str = None, ind
     # 1) Most recently CONFIRMED structure break (BrokenIndex-based)
     events = confirmed_structure_events(structure)
     recent_events = events[events["confirm_pos"] >= len(ohlc) - 1 - config.STRUCTURE_RECENCY_BARS] if not events.empty else events
+    structure_confirm_pos = None
     if not recent_events.empty:
         row = recent_events.iloc[-1]
+        structure_confirm_pos = int(row["confirm_pos"])
         if row.get("BOS") == 1 or row.get("CHOCH") == 1:
             bull_score += config.WEIGHT_STRUCTURE
             bull_flags.add("structure")
@@ -216,6 +307,18 @@ def score_signal(symbol: str, ohlc: pd.DataFrame, htf_direction: str = None, ind
             bear_score += config.WEIGHT_STRUCTURE
             bear_flags.add("structure")
             reasons.append("Most recently confirmed structure break is bearish (BOS/CHoCH down)")
+
+    # Volume confirmation on that structure break — real institutional
+    # participation vs a low-volume drift that shakes out easily. Only
+    # scored on the side that already has a structure break (a volume spike
+    # alone, unconnected to a break, isn't a directional confluence).
+    if structure_confirm_pos is not None and _volume_confirmed(ohlc, structure_confirm_pos):
+        if "structure" in bull_flags:
+            bull_score += config.WEIGHT_VOLUME_CONFIRMATION
+            reasons.append("Structure break occurred on above-average volume — real participation, not a thin drift")
+        elif "structure" in bear_flags:
+            bear_score += config.WEIGHT_VOLUME_CONFIRMATION
+            reasons.append("Structure break occurred on above-average volume — real participation, not a thin drift")
 
     # 2) Nearby unmitigated order block — counted ONCE per direction even if
     #    several rows match (they're the same zone, not independent confirmations)
@@ -289,7 +392,7 @@ def score_signal(symbol: str, ohlc: pd.DataFrame, htf_direction: str = None, ind
 
     if bull_score == bear_score or max(bull_score, bear_score) < config.MIN_SCORE_TO_ALERT:
         return Signal(symbol=symbol, direction="NO TRADE", score=max(bull_score, bear_score), reasons=reasons,
-                       warnings=warnings, htf_bias=htf_direction, index_bias=index_direction)
+                       warnings=warnings, htf_bias=htf_direction, index_bias=index_direction, adx=adx, rsi=rsi)
 
     direction = "LONG" if bull_score > bear_score else "SHORT"
     score = max(bull_score, bear_score)
@@ -305,6 +408,20 @@ def score_signal(symbol: str, ohlc: pd.DataFrame, htf_direction: str = None, ind
     index_warning = _index_conflict_warning(direction, index_direction)
     if index_warning:
         warnings.append(index_warning)
+
+    # Trend-strength regime (beyond SMC): structural signals are historically
+    # less reliable when the market isn't trending. Doesn't block the setup.
+    if adx is not None and adx < config.ADX_TREND_THRESHOLD:
+        warnings.append(f"ADX is {adx:.0f}, below the {config.ADX_TREND_THRESHOLD} trend threshold — the market is "
+                         f"in a choppy/range-bound regime where structural SMC signals are historically less reliable")
+
+    # Momentum context (beyond SMC): flags a potentially stretched entry —
+    # doesn't invalidate the structural setup, just adds risk context.
+    if rsi is not None:
+        if direction == "LONG" and rsi >= config.RSI_OVERBOUGHT:
+            warnings.append(f"RSI is {rsi:.0f} (overbought) — this is a stretched entry on momentum, even though the structure is bullish")
+        elif direction == "SHORT" and rsi <= config.RSI_OVERSOLD:
+            warnings.append(f"RSI is {rsi:.0f} (oversold) — this is a stretched entry on momentum, even though the structure is bearish")
 
     # Risk levels: stop beyond the most recent opposite swing, floored at a
     # minimum ATR distance so a lucky/noisy micro-swing can't produce an
@@ -328,7 +445,7 @@ def score_signal(symbol: str, ohlc: pd.DataFrame, htf_direction: str = None, ind
     if risk <= 0:
         return Signal(symbol=symbol, direction="NO TRADE", score=score, reasons=reasons,
                        warnings=warnings + ["Could not compute a valid stop distance"],
-                       htf_bias=htf_direction, index_bias=index_direction)
+                       htf_bias=htf_direction, index_bias=index_direction, adx=adx, rsi=rsi)
     rr = round(reward / risk, 2)
 
     if rr < 1.0:
@@ -341,13 +458,15 @@ def score_signal(symbol: str, ohlc: pd.DataFrame, htf_direction: str = None, ind
             f"{config.GAP_RISK_LOOKBACK_DAYS} sessions — a gap could skip past your stop before it can execute"
         )
 
-    win_rate, samples, resolved_total = backtest_setup(ohlc, direction, risk, reward)
+    win_rate, samples, resolved_total, avg_win_bars = backtest_setup(ohlc, direction, risk, reward)
 
     confidence = None
     if samples >= config.BACKTEST_MIN_SAMPLES:
         confidence = "High" if samples >= config.CONFIDENCE_HIGH_SAMPLES else "Medium"
     elif samples > 0:
         confidence = "Low"
+
+    horizon_days, horizon_label = _time_horizon(avg_win_bars)
 
     return Signal(
         symbol=symbol,
@@ -364,6 +483,10 @@ def score_signal(symbol: str, ohlc: pd.DataFrame, htf_direction: str = None, ind
         confidence=confidence,
         htf_bias=htf_direction,
         index_bias=index_direction,
+        adx=adx,
+        rsi=rsi,
+        time_horizon_days=horizon_days,
+        time_horizon_label=horizon_label,
     )
 
 
@@ -382,7 +505,10 @@ def backtest_setup(ohlc: pd.DataFrame, direction: str, risk_dist: float, reward_
         OHLC can't tell us which was touched first intrabar)
       - neither hit in the window -> excluded as inconclusive
 
-    Returns (win_rate_pct or None, resolved_sample_count, total_occurrences_checked).
+    Returns (win_rate_pct or None, resolved_sample_count, total_occurrences_checked,
+    avg_bars_to_target_among_wins or None). The last value is the data-driven
+    basis for the time-horizon estimate — how many bars, on average, it took
+    for a WINNING trade of this exact setup to actually reach target.
     None win_rate means fewer than BACKTEST_MIN_SAMPLES resolved trades —
     an honest "not enough data" instead of a number built on noise.
     """
@@ -395,7 +521,7 @@ def backtest_setup(ohlc: pd.DataFrame, direction: str, risk_dist: float, reward_
 
     events = confirmed_structure_events(structure)
     if events.empty:
-        return None, 0, 0
+        return None, 0, 0, None
     hits = events[(events["BOS"] == target_val) | (events["CHOCH"] == target_val)]
 
     highs = ohlc["high"].values
@@ -404,6 +530,7 @@ def backtest_setup(ohlc: pd.DataFrame, direction: str, risk_dist: float, reward_
     atr_vals = atr_series.values
 
     wins, resolved, checked = 0, 0, 0
+    win_bar_counts = []
     for pos in hits["confirm_pos"]:
         pos = int(pos)
         if pos >= len(atr_vals) or np.isnan(atr_vals[pos]):
@@ -422,6 +549,7 @@ def backtest_setup(ohlc: pd.DataFrame, direction: str, risk_dist: float, reward_
 
         checked += 1
         outcome = None
+        bars_to_resolution = None
         end = min(pos + 1 + config.BACKTEST_FORWARD_BARS, len(closes))
         for j in range(pos + 1, end):
             if direction == "LONG":
@@ -435,6 +563,7 @@ def backtest_setup(ohlc: pd.DataFrame, direction: str, risk_dist: float, reward_
                 break
             if hit_target:
                 outcome = True
+                bars_to_resolution = j - pos
                 break
             if hit_stop:
                 outcome = False
@@ -443,7 +572,11 @@ def backtest_setup(ohlc: pd.DataFrame, direction: str, risk_dist: float, reward_
         if outcome is not None:
             resolved += 1
             wins += int(outcome)
+            if outcome and bars_to_resolution is not None:
+                win_bar_counts.append(bars_to_resolution)
+
+    avg_win_bars = (sum(win_bar_counts) / len(win_bar_counts)) if win_bar_counts else None
 
     if resolved < config.BACKTEST_MIN_SAMPLES:
-        return None, resolved, checked
-    return round(100 * wins / resolved, 1), resolved, checked
+        return None, resolved, checked, avg_win_bars
+    return round(100 * wins / resolved, 1), resolved, checked, avg_win_bars

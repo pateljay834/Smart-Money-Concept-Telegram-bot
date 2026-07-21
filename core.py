@@ -13,6 +13,7 @@ import config
 from data_fetch import get_ohlc
 from smc_engine import score_signal, htf_bias, index_bias, Signal
 from chart_utils import plot_chart
+from fundamentals import fetch_fundamentals, format_fundamentals
 
 log = logging.getLogger("smc_core")
 
@@ -77,6 +78,13 @@ def analyze_one(symbol: str, index_direction: str = None) -> AnalysisResult:
                 log.warning(f"{symbol}: HTF fetch failed, continuing without HTF bias")
 
         signal = score_signal(symbol, ohlc, htf_direction=htf_direction, index_direction=index_direction)
+
+        if config.USE_FUNDAMENTALS and signal.direction != "NO TRADE":
+            # Only for symbols that already qualify — this is enrichment,
+            # not core to the signal, so it's not worth the extra API call
+            # (and yfinance's .info flakiness) for every ticker in a screen.
+            signal.fundamentals = fetch_fundamentals(symbol)
+
         chart_path = plot_chart(symbol, ohlc, signal)
         return AnalysisResult(symbol=symbol, signal=signal, chart_path=chart_path)
     except Exception as e:
@@ -107,9 +115,16 @@ def build_analysis_message(signal: Signal) -> str:
         f"<i>{ts}</i>",
         "",
         f"<b>Bias:</b> {signal.direction}   <b>Score:</b> {signal.score}/{config.MAX_POSSIBLE_SCORE}{trend_str}",
-        "",
-        "<b>Confluences</b>",
     ]
+    if signal.adx is not None or signal.rsi is not None:
+        context_bits = []
+        if signal.adx is not None:
+            context_bits.append(f"ADX {signal.adx:.0f}")
+        if signal.rsi is not None:
+            context_bits.append(f"RSI {signal.rsi:.0f}")
+        lines.append(f"<b>Momentum/trend context:</b> {', '.join(context_bits)}")
+    lines.append("")
+    lines.append("<b>Confluences</b>")
     lines += [f"• {r}" for r in signal.reasons] if signal.reasons else ["• None detected"]
 
     if signal.warnings:
@@ -146,6 +161,19 @@ def build_analysis_message(signal: Signal) -> str:
             )
         else:
             lines.append("No resolved historical occurrences of this exact setup found on this symbol yet.")
+
+        if signal.time_horizon_label:
+            lines.append(f"Expected time horizon: <b>{signal.time_horizon_label}</b> "
+                         f"(avg {signal.time_horizon_days} trading days to target across past wins of this setup)")
+        else:
+            lines.append("Time horizon: not enough resolved winning trades yet to estimate a holding period.")
+
+    if signal.fundamentals:
+        fund_text = format_fundamentals(signal.fundamentals)
+        if fund_text:
+            lines.append("")
+            lines.append("<b>Fundamentals</b> (best-effort, not always available)")
+            lines.append(fund_text)
 
     lines.append("")
     lines.append(f"<i>{config.REGULATORY_DISCLAIMER}</i>")

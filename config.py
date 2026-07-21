@@ -112,7 +112,7 @@ CONFIDENCE_HIGH_SAMPLES = 30    # samples at/above this get labeled High confide
 MIN_SCORE_TO_ALERT = 5  # out of MAX_POSSIBLE_SCORE (10)
 
 # Safety cap so a mistyped list of 200 tickers doesn't blow past API rate limits / run time
-MAX_TICKERS_PER_RUN = 25
+MAX_TICKERS_PER_RUN = 200
 
 # Position sizing — opt-in. Set ACCOUNT_SIZE to a real number (e.g. via .env /
 # a secret, not hardcoded here) to get a suggested share quantity per trade
